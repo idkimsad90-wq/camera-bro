@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Camera</title>
+<style>
+  :root { --ui: #fff; }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-user-select:none; user-select:none; }
+  html,body { height:100%; background:#000; overflow:hidden; font-family:-apple-system,sans-serif; }
+  #stage { position:fixed; inset:0; background:#000; }
+  #feed { width:100%; height:100%; object-fit:cover; background:#000; }
+  #feed.hidden { display:none; }
+
+  /* grid overlay */
+  #grid { position:absolute; inset:0; pointer-events:none; opacity:.35; }
+  #grid::before, #grid::after { content:""; position:absolute; background:var(--ui); }
+  #grid::before { left:33.33%; right:33.33%; top:0; bottom:0; border-left:1px solid var(--ui); border-right:1px solid var(--ui); background:none; }
+  #grid::after { top:33.33%; bottom:33.33%; left:0; right:0; border-top:1px solid var(--ui); border-bottom:1px solid var(--ui); background:none; }
+
+  /* top bar */
+  #topbar { position:absolute; top:env(safe-area-inset-top,8px); left:0; right:0;
+    display:flex; justify-content:space-between; align-items:center; padding:10px 16px;
+    color:var(--ui); font-size:13px; font-weight:600; letter-spacing:.3px;
+    text-shadow:0 1px 2px rgba(0,0,0,.6); }
+  #rec { display:flex; align-items:center; gap:6px; }
+  #rec .dot { width:8px; height:8px; border-radius:50%; background:#ff3b30; animation:blink 1.6s infinite; }
+  @keyframes blink { 50% { opacity:.2; } }
+  #timer { font-variant-numeric:tabular-nums; }
+
+  /* bottom controls */
+  #controls { position:absolute; bottom:calc(env(safe-area-inset-bottom,20px) + 14px);
+    left:0; right:0; display:flex; align-items:center; justify-content:space-between;
+    padding:0 28px; }
+  .side { width:52px; height:52px; border-radius:12px; background:rgba(255,255,255,.14);
+    backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); display:flex;
+    align-items:center; justify-content:center; color:var(--ui); font-size:22px;
+    border:none; }
+  #shutter { width:74px; height:74px; border-radius:50%; background:#fff;
+    border:4px solid rgba(0,0,0,.25); box-shadow:0 0 0 2px #fff inset; }
+  #shutter:active { transform:scale(.94); }
+
+  /* editor sheet */
+  #editor { position:fixed; inset:0; background:rgba(0,0,0,.92); color:#fff;
+    display:none; flex-direction:column; justify-content:center; padding:24px; gap:16px; z-index:10; }
+  #editor.open { display:flex; }
+  #editor h2 { font-size:18px; font-weight:700; }
+  #editor label { font-size:14px; opacity:.8; display:block; margin-bottom:6px; }
+  #editor input[type=file] { width:100%; color:#fff; }
+  #editor .row { display:flex; gap:12px; }
+  #editor button { flex:1; padding:14px; border-radius:12px; border:none; font-size:16px;
+    font-weight:600; background:#2c2c2e; color:#fff; }
+  #editor button.primary { background:#0a84ff; }
+  #editor .hint { font-size:12px; opacity:.55; line-height:1.4; }
+
+  /* toast */
+  #toast { position:fixed; left:50%; bottom:120px; transform:translateX(-50%) translateY(10px);
+    background:rgba(0,0,0,.8); color:#fff; padding:10px 18px; border-radius:20px;
+    font-size:14px; opacity:0; transition:.25s; pointer-events:none; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+  #flash { position:fixed; inset:0; background:#fff; opacity:0; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="feed" playsinline muted loop></video>
+  <div id="grid"></div>
+
+  <div id="topbar">
+    <div id="rec"><span class="dot"></span><span id="recLabel">REC</span></div>
+    <div id="timer">00:00</div>
+  </div>
+
+  <div id="controls">
+    <button class="side" id="flipBtn" title="Switch front/back">⟲</button>
+    <button id="shutter" aria-label="Capture"></button>
+    <button class="side" id="editBtn" title="Edit feed">✎</button>
+  </div>
+
+  <div id="flash"></div>
+  <div id="toast"></div>
+</div>
+
+<div id="editor">
+  <h2>Camera Simulator — Setup</h2>
+  <div>
+    <label>Back camera feed (video or image)</label>
+    <input type="file" id="backInput" accept="video/*,image/*">
+  </div>
+  <div>
+    <label>Front camera feed (video or image)</label>
+    <input type="file" id="frontInput" accept="video/*,image/*">
+  </div>
+  <div class="row">
+    <button id="loopBtn">Loop: On</button>
+    <button id="closeEditor" class="primary">Done</button>
+  </div>
+  <div class="hint">Tip: Add this page to your Home Screen (Share → Add to Home Screen) so it opens fullscreen like a camera app. Hold the top bar to reopen this setup.</div>
+</div>
+
+<script>
+(() => {
+  const feed = document.getElementById('feed');
+  const backInput = document.getElementById('backInput');
+  const frontInput = document.getElementById('frontInput');
+  const editor = document.getElementById('editor');
+  const closeEditor = document.getElementById('closeEditor');
+  const loopBtn = document.getElementById('loopBtn');
+  const flipBtn = document.getElementById('flipBtn');
+  const editBtn = document.getElementById('editBtn');
+  const shutter = document.getElementById('shutter');
+  const timerEl = document.getElementById('timer');
+  const flash = document.getElementById('flash');
+  const toastEl = document.getElementById('toast');
+  const topbar = document.getElementById('topbar');
+
+  const state = {
+    back: null,   // {url, isVideo}
+    front: null,
+    current: 'back',
+    loop: true,
+    playing: false,
+    startTime: 0,
+    timerId: null
+  };
+
+  const LS_KEY = 'camsim.feeds.v1';
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => toastEl.classList.remove('show'), 1800);
+  }
+
+  // Persist media as data URLs so they survive reopening (small clips only).
+  function saveFeed(slot, file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          localStorage.setItem(LS_KEY + '.' + slot, JSON.stringify({
+            url: reader.result,
+            isVideo: file.type.startsWith('video'),
+            name: file.name
+          }));
+        } catch (e) {
+          toast('Clip too large to remember — will still play this session');
+        }
+        resolve({ url: URL.createObjectURL(file), isVideo: file.type.startsWith('video') });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function loadSaved(slot) {
+    try {
+      const raw = localStorage.getItem(LS_KEY + '.' + slot);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+
+  function renderFeed(slot) {
+    const data = slot === 'back' ? state.back : state.front;
+    if (!data) { feed.classList.add('hidden'); return; }
+    feed.classList.remove('hidden');
+    if (data.isVideo) {
+      feed.src = data.url;
+      feed.loop = state.loop;
+      feed.play().catch(() => {});
+      state.playing = true;
+      startTimer();
+    } else {
+      feed.pause();
+      feed.removeAttribute('src');
+      feed.load();
+      feed.classList.add('hidden');
+      // show image via background
+      document.getElementById('stage').style.background =
+        `#000 center/cover no-repeat url("${data.url}")`;
+      stopTimer();
+      state.playing = false;
+    }
+  }
+
+  function startTimer() {
+    stopTimer();
+    state.startTime = Date.now();
+    state.timerId = setInterval(() => {
+      const s = Math.floor((Date.now() - state.startTime) / 1000);
+      const mm = String(Math.floor(s / 60)).padStart(2, '0');
+      const ss = String(s % 60).padStart(2, '0');
+      timerEl.textContent = `${mm}:${ss}`;
+    }, 250);
+  }
+  function stopTimer() {
+    clearInterval(state.timerId);
+    state.timerId = null;
+    timerEl.textContent = '00:00';
+  }
+
+  async function onPick(slot, file) {
+    if (!file) return;
+    const data = await saveFeed(slot, file);
+    state[slot] = data;
+    state.current = slot;
+    document.getElementById('stage').style.background = '#000';
+    renderFeed(slot);
+    toast(slot === 'back' ? 'Back feed loaded' : 'Front feed loaded');
+  }
+
+  backInput.addEventListener('change', e => onPick('back', e.target.files[0]));
+  frontInput.addEventListener('change', e => onPick('front', e.target.files[0]));
+
+  flipBtn.addEventListener('click', () => {
+    state.current = state.current === 'back' ? 'front' : 'back';
+    if (!state[state.current]) { toast('No ' + state.current + ' feed loaded'); return; }
+    document.getElementById('stage').style.background = '#000';
+    renderFeed(state.current);
+  });
+
+  loopBtn.addEventListener('click', () => {
+    state.loop = !state.loop;
+    feed.loop = state.loop;
+    loopBtn.textContent = 'Loop: ' + (state.loop ? 'On' : 'Off');
+  });
+
+  editBtn.addEventListener('click', () => editor.classList.add('open'));
+  closeEditor.addEventListener('click', () => editor.classList.remove('open'));
+
+  // Hold top bar to reopen setup
+  let holdT;
+  topbar.addEventListener('touchstart', () => { holdT = setTimeout(() => editor.classList.add('open'), 600); });
+  topbar.addEventListener('touchend', () => clearTimeout(holdT));
+  topbar.addEventListener('touchcancel', () => clearTimeout(holdT));
+
+  // Shutter: capture current frame (video frame or image) to download
+  function flashNow() {
+    flash.style.transition = 'none';
+    flash.style.opacity = '.9';
+    requestAnimationFrame(() => {
+      flash.style.transition = 'opacity .35s';
+      flash.style.opacity = '0';
+    });
+  }
+
+  function capture() {
+    flashNow();
+    const data = state.current === 'back' ? state.back : state.front;
+    if (!data) { toast('No feed loaded'); return; }
+
+    const canvas = document.createElement('canvas');
+    const stageBg = getComputedStyle(document.getElementById('stage')).backgroundImage;
+    const isVideo = data.isVideo && !feed.classList.contains('hidden');
+
+    if (isVideo) {
+      const vw = feed.videoWidth, vh = feed.videoHeight;
+      if (!vw) { toast('Video not ready'); return; }
+      canvas.width = vw; canvas.height = vh;
+      canvas.getContext('2d').drawImage(feed, 0, 0, vw, vh);
+    } else {
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.width; canvas.height = img.height;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        download(canvas);
+      };
+      img.src = data.url;
+      return;
+    }
+    download(canvas);
+  }
+
+  function download(canvas) {
+    canvas.toBlob(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'IMG_' + Date.now() + '.jpg';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast('Saved — check Files/Photos');
+    }, 'image/jpeg', 0.92);
+  }
+
+  shutter.addEventListener('click', capture);
+
+  // restore saved feeds on load
+  ['back', 'front'].forEach(slot => {
+    const saved = loadSaved(slot);
+    if (saved) {
+      state[slot] = { url: saved.url, isVideo: saved.isVideo };
+    }
+  });
+  if (state.back || state.front) {
+    state.current = state.back ? 'back' : 'front';
+    renderFeed(state.current);
+  } else {
+    editor.classList.add('open');
+  }
+
+  loopBtn.textContent = 'Loop: On';
+})();
+</script>
+</body>
+</html>
